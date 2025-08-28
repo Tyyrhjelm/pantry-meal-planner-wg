@@ -9,8 +9,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { Camera, Upload, Loader2, X, Check } from "lucide-react"
-import { createWorker } from "tesseract.js"
+import { Camera, Upload, Loader2, X, Check, AlertCircle } from "lucide-react"
 import type { PantryItemForm } from "@/lib/types"
 
 interface ReceiptScannerProps {
@@ -32,8 +31,19 @@ export function ReceiptScanner({ isOpen, onClose, onItemsConfirmed }: ReceiptSca
   const [extractedItems, setExtractedItems] = useState<ExtractedItem[]>([])
   const [selectedImage, setSelectedImage] = useState<string | null>(null)
   const [processingStep, setProcessingStep] = useState("")
+  const [ocrError, setOcrError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const cameraInputRef = useRef<HTMLInputElement>(null)
+
+  const loadTesseract = async () => {
+    try {
+      const tesseract = await import("tesseract.js")
+      return tesseract.createWorker
+    } catch (error) {
+      console.error("[v0] Failed to load Tesseract.js:", error)
+      throw new Error("OCR functionality is currently unavailable. Please try again later or add items manually.")
+    }
+  }
 
   const preprocessImage = (canvas: HTMLCanvasElement, ctx: CanvasRenderingContext2D) => {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height)
@@ -283,6 +293,7 @@ export function ReceiptScanner({ isOpen, onClose, onItemsConfirmed }: ReceiptSca
   const processImage = async (file: File) => {
     setIsProcessing(true)
     setProcessingStep("Loading image...")
+    setOcrError(null)
 
     try {
       // Create image preview
@@ -302,37 +313,47 @@ export function ReceiptScanner({ isOpen, onClose, onItemsConfirmed }: ReceiptSca
         setProcessingStep("Preprocessing image...")
         preprocessImage(canvas, ctx)
 
-        setProcessingStep("Extracting text with OCR...")
-
-        // Initialize Tesseract worker
-        const worker = await createWorker("eng")
-
-        // Configure Tesseract for better receipt recognition
-        await worker.setParameters({
-          tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,@$-",
-          tessedit_pageseg_mode: "6", // Uniform block of text
-          preserve_interword_spaces: "1",
-        })
+        setProcessingStep("Loading OCR engine...")
 
         try {
-          const {
-            data: { text },
-          } = await worker.recognize(canvas)
-          console.log("[v0] OCR extracted text:", text)
+          const createWorker = await loadTesseract()
 
-          setProcessingStep("Parsing receipt items...")
-          const items = parseReceiptText(text)
-          console.log("[v0] Parsed items:", items)
+          setProcessingStep("Extracting text with OCR...")
 
-          setExtractedItems(items)
+          // Initialize Tesseract worker
+          const worker = await createWorker("eng")
 
-          if (items.length === 0) {
-            setProcessingStep("No items found. Try a clearer image.")
-          } else {
-            setProcessingStep(`Found ${items.length} items`)
+          // Configure Tesseract for better receipt recognition
+          await worker.setParameters({
+            tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,@$-",
+            tessedit_pageseg_mode: "6", // Uniform block of text
+            preserve_interword_spaces: "1",
+          })
+
+          try {
+            const {
+              data: { text },
+            } = await worker.recognize(canvas)
+            console.log("[v0] OCR extracted text:", text)
+
+            setProcessingStep("Parsing receipt items...")
+            const items = parseReceiptText(text)
+            console.log("[v0] Parsed items:", items)
+
+            setExtractedItems(items)
+
+            if (items.length === 0) {
+              setProcessingStep("No items found. Try a clearer image.")
+            } else {
+              setProcessingStep(`Found ${items.length} items`)
+            }
+          } finally {
+            await worker.terminate()
           }
-        } finally {
-          await worker.terminate()
+        } catch (ocrLoadError) {
+          console.error("[v0] OCR loading error:", ocrLoadError)
+          setOcrError(ocrLoadError instanceof Error ? ocrLoadError.message : "Failed to load OCR engine")
+          setProcessingStep("OCR unavailable - you can add items manually")
         }
 
         URL.revokeObjectURL(imageUrl)
@@ -340,8 +361,9 @@ export function ReceiptScanner({ isOpen, onClose, onItemsConfirmed }: ReceiptSca
 
       img.src = imageUrl
     } catch (error) {
-      console.error("[v0] OCR processing error:", error)
+      console.error("[v0] Image processing error:", error)
       setProcessingStep("Error processing image. Please try again.")
+      setOcrError("Failed to process image")
     } finally {
       setIsProcessing(false)
     }
@@ -427,6 +449,21 @@ export function ReceiptScanner({ isOpen, onClose, onItemsConfirmed }: ReceiptSca
                 <div className="text-center space-y-2">
                   <Loader2 className="h-8 w-8 animate-spin mx-auto" />
                   <p className="text-sm text-muted-foreground">{processingStep}</p>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {ocrError && (
+            <Card className="border-orange-200 bg-orange-50">
+              <CardContent className="flex items-center gap-3 py-4">
+                <AlertCircle className="h-5 w-5 text-orange-600" />
+                <div>
+                  <p className="text-sm font-medium text-orange-800">OCR Unavailable</p>
+                  <p className="text-sm text-orange-700">{ocrError}</p>
+                  <p className="text-xs text-orange-600 mt-1">
+                    You can still view the image and add items manually using the pantry page.
+                  </p>
                 </div>
               </CardContent>
             </Card>
