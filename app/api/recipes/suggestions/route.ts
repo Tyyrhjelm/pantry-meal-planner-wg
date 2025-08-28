@@ -6,6 +6,20 @@ import type { Recipe, PantryItem, ApiResponse } from "@/lib/types"
 import { createServerClient } from "@/lib/supabase/server"
 import { validateRequest, rateLimitByIP } from "@/lib/security"
 
+const RecipeSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  ingredients: z.array(z.string()),
+  instructions: z.array(z.string()),
+  prepTime: z.string(),
+  difficulty: z.enum(["Easy", "Medium", "Hard"]),
+  servings: z.number(),
+})
+
+const RecipeSuggestionsSchema = z.object({
+  recipes: z.array(RecipeSchema),
+})
+
 interface RecipeSuggestion extends Recipe {
   matchScore: number
   missingIngredients: string[]
@@ -265,17 +279,3 @@ Make the recipes diverse in style and cooking method. Focus on creating satisfyi
     )
   }
 }
-
-const RecipeSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  ingredients: z.array(z.string()),
-  instructions: z.array(z.string()),
-  prepTime: z.string(),
-  difficulty: z.enum(["Easy", "Medium", "Hard"]),
-  servings: z.number(),
-})
-
-const RecipeSuggestionsSchema = z.object({
-  recipes: z.array(RecipeSchema),
-})
