@@ -41,7 +41,14 @@ export function AddItemDialog({ onAddItem, isLoading = false }: AddItemDialogPro
     e.preventDefault()
     if (!formData.name.trim()) return
 
-    onAddItem(formData)
+    const processedFormData = {
+      ...formData,
+      expirationDate: formData.expirationDate
+        ? new Date(formData.expirationDate + "T00:00:00.000Z").toISOString()
+        : null,
+    }
+
+    onAddItem(processedFormData)
 
     // Reset form
     setFormData({

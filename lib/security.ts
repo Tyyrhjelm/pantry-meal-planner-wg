@@ -1,6 +1,7 @@
 import { z } from "zod"
 import type { NextRequest } from "next/server"
 import DOMPurify from "isomorphic-dompurify"
+import crypto from "crypto"
 
 export class SecurityError extends Error {
   constructor(
@@ -83,9 +84,12 @@ export const PantryItemSchema = z.object({
     .min(1)
     .max(50)
     .regex(/^[a-zA-Z\s&]+$/, "Invalid category format"),
-  expirationDate: z.string().datetime().optional().nullable(),
+  expirationDate: z.union([z.string().datetime(), z.null()]).optional(),
   location: z.string().max(100).optional(),
   notes: z.string().max(500).optional(),
+  barcode: z.string().optional(),
+  brand: z.string().optional(),
+  price: z.number().optional(),
 })
 
 export const RecipeSchema = z.object({
@@ -154,4 +158,28 @@ export async function validateRequestSize(request: NextRequest, maxSize = 1024 *
   if (contentLength && Number.parseInt(contentLength) > maxSize) {
     throw new SecurityError("Request body too large", 413)
   }
+}
+
+export async function validateRequest(request: NextRequest): Promise<{ success: boolean; error?: string }> {
+  try {
+    validateContentType(request)
+    await validateRequestSize(request)
+    return { success: true }
+  } catch (error) {
+    if (error instanceof SecurityError) {
+      return { success: false, error: error.message }
+    }
+    return { success: false, error: "Request validation failed" }
+  }
+}
+
+export async function rateLimitByIP(request: NextRequest): Promise<{ success: boolean; error?: string }> {
+  const ip = getClientIP(request)
+  const allowed = rateLimit(ip)
+
+  if (!allowed) {
+    return { success: false, error: "Rate limit exceeded" }
+  }
+
+  return { success: true }
 }

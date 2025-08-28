@@ -28,17 +28,23 @@ export default function PantryRecipesPage() {
   const loadData = async () => {
     setLoading(true)
     try {
-      // Load pantry items for AI suggestions
-      const pantryData = JSON.parse(localStorage.getItem("pantryItems") || "[]")
-      setPantryItems(pantryData)
+      const pantryResponse = await fetch("/api/pantry")
+      if (pantryResponse.ok) {
+        const pantryData = await pantryResponse.json()
+        setPantryItems(pantryData.data || [])
+      }
 
-      // Load traditional recipe suggestions
       const response = await recipeApi.getSuggestions()
+      console.log("[v0] Recipe API response:", response)
       if (response.success && response.data) {
-        setRecipes(response.data as RecipeSuggestion[])
+        // The API returns { recipes: [...] }, so we need to access the recipes array
+        const recipesData = response.data.recipes || response.data
+        console.log("[v0] Setting recipes:", recipesData)
+        setRecipes(Array.isArray(recipesData) ? recipesData : [])
       }
     } catch (error) {
       console.error("Failed to load data:", error)
+      setRecipes([]) // Ensure recipes is always an array
     } finally {
       setLoading(false)
     }
@@ -132,13 +138,15 @@ export default function PantryRecipesPage() {
                   <div className="flex items-center gap-4 text-sm text-muted-foreground">
                     <div className="flex items-center gap-1">
                       <Clock className="h-4 w-4" />
-                      <span>{recipe.prepTime + recipe.cookTime} min</span>
+                      <span>{(recipe.prepTime || "0") + (recipe.cookTime || "0")} min</span>
                     </div>
                     <div className="flex items-center gap-1">
                       <Users className="h-4 w-4" />
-                      <span>{recipe.servings} servings</span>
+                      <span>{recipe.servings || 1} servings</span>
                     </div>
-                    <Badge className={getDifficultyColor(recipe.difficulty)}>{recipe.difficulty}</Badge>
+                    <Badge className={getDifficultyColor(recipe.difficulty || "medium")}>
+                      {recipe.difficulty || "Medium"}
+                    </Badge>
                   </div>
 
                   {/* Missing Ingredients */}
@@ -156,7 +164,7 @@ export default function PantryRecipesPage() {
                   )}
 
                   {/* Tags */}
-                  {recipe.tags.length > 0 && (
+                  {recipe.tags && recipe.tags.length > 0 && (
                     <div className="flex flex-wrap gap-1">
                       {recipe.tags.slice(0, 3).map((tag) => (
                         <Badge key={tag} variant="secondary" className="text-xs">

@@ -1,106 +1,10 @@
 import { type NextRequest, NextResponse } from "next/server"
 import { groq } from "@ai-sdk/groq"
-import { generateObject } from "ai"
+import { generateText } from "ai"
 import { z } from "zod"
 import type { Recipe, PantryItem, ApiResponse } from "@/lib/types"
-
-// Mock pantry items (in production, this would fetch from database)
-const mockPantryItems: PantryItem[] = [
-  {
-    id: "1",
-    name: "Eggs",
-    quantity: 12,
-    unit: "pieces",
-    category: "Dairy",
-    expirationDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-    purchaseDate: new Date(),
-    location: "Refrigerator",
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  },
-  {
-    id: "2",
-    name: "Bread",
-    quantity: 1,
-    unit: "loaf",
-    category: "Grains & Cereals",
-    expirationDate: new Date(Date.now() + 5 * 24 * 60 * 60 * 1000),
-    purchaseDate: new Date(),
-    location: "Counter",
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  },
-]
-
-// Mock recipes database
-const mockRecipes: Recipe[] = [
-  {
-    id: "1",
-    name: "Scrambled Eggs",
-    description: "Simple and delicious scrambled eggs",
-    ingredients: [
-      { pantryItemName: "Eggs", quantity: 2, unit: "pieces" },
-      { pantryItemName: "Butter", quantity: 1, unit: "tbsp", optional: true },
-    ],
-    instructions: [
-      "Crack eggs into a bowl and whisk",
-      "Heat butter in a pan over medium heat",
-      "Add eggs and stir gently until cooked",
-    ],
-    prepTime: 5,
-    cookTime: 5,
-    servings: 1,
-    difficulty: "easy",
-    tags: ["breakfast", "quick", "protein"],
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  },
-  {
-    id: "2",
-    name: "French Toast",
-    description: "Classic French toast with cinnamon",
-    ingredients: [
-      { pantryItemName: "Bread", quantity: 4, unit: "slices" },
-      { pantryItemName: "Eggs", quantity: 2, unit: "pieces" },
-      { pantryItemName: "Milk", quantity: 0.25, unit: "cups" },
-      { pantryItemName: "Cinnamon", quantity: 0.5, unit: "tsp" },
-    ],
-    instructions: [
-      "Whisk eggs, milk, and cinnamon in a shallow bowl",
-      "Dip bread slices in the mixture",
-      "Cook in a buttered pan until golden brown on both sides",
-    ],
-    prepTime: 10,
-    cookTime: 10,
-    servings: 2,
-    difficulty: "easy",
-    tags: ["breakfast", "sweet", "comfort-food"],
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  },
-  {
-    id: "3",
-    name: "Egg Sandwich",
-    description: "Quick egg sandwich for breakfast or lunch",
-    ingredients: [
-      { pantryItemName: "Bread", quantity: 2, unit: "slices" },
-      { pantryItemName: "Eggs", quantity: 1, unit: "pieces" },
-      { pantryItemName: "Cheese", quantity: 1, unit: "slice", optional: true },
-    ],
-    instructions: [
-      "Toast the bread slices",
-      "Fry or scramble the egg",
-      "Assemble sandwich with egg and optional cheese",
-    ],
-    prepTime: 5,
-    cookTime: 5,
-    servings: 1,
-    difficulty: "easy",
-    tags: ["breakfast", "lunch", "quick"],
-    createdAt: new Date(),
-    updatedAt: new Date(),
-  },
-]
+import { createServerClient } from "@/lib/supabase/server"
+import { validateRequest, rateLimitByIP } from "@/lib/security"
 
 interface RecipeSuggestion extends Recipe {
   matchScore: number
@@ -108,31 +12,67 @@ interface RecipeSuggestion extends Recipe {
   canMake: boolean
 }
 
-// POST /api/recipes/suggestions - Get AI-powered recipe suggestions
-export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<any>>> {
+// GET /api/recipes/suggestions - Get AI-powered recipe suggestions using real pantry data
+export async function GET(request: NextRequest): Promise<NextResponse<ApiResponse<any>>> {
   try {
-    const body = await request.json()
-    const { pantryItems, preferences = {} } = body
+    console.log("[v0] Recipe suggestions API called")
+
+    // Rate limiting and request validation
+    const rateLimitResult = await rateLimitByIP(request)
+    if (!rateLimitResult.success) {
+      return NextResponse.json({ success: false, error: rateLimitResult.error }, { status: 429 })
+    }
+
+    const requestValidationResult = await validateRequest(request)
+    if (!requestValidationResult.success) {
+      return NextResponse.json({ success: false, error: requestValidationResult.error }, { status: 400 })
+    }
+
+    const supabase = await createServerClient()
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser()
+
+    if (authError || !user) {
+      console.log("[v0] Recipe suggestions - Authentication failed:", authError?.message)
+      return NextResponse.json({ success: false, error: "Authentication required" }, { status: 401 })
+    }
+
+    console.log("[v0] Recipe suggestions - User authenticated:", user.email)
+
+    // Fetch user's actual pantry items from database
+    const { data: pantryItems, error: fetchError } = await supabase
+      .from("pantry_items")
+      .select("*")
+      .eq("user_id", user.id)
+      .gt("quantity", 0) // Only items with quantity > 0
+
+    if (fetchError) {
+      console.error("[v0] Recipe suggestions - Database error:", fetchError)
+      return NextResponse.json({ success: false, error: "Failed to fetch pantry items" }, { status: 500 })
+    }
+
+    console.log("[v0] Recipe suggestions - Found pantry items:", pantryItems?.length || 0)
 
     if (!pantryItems || pantryItems.length === 0) {
-      return NextResponse.json(
-        {
-          success: false,
-          error: "No pantry items provided",
-        },
-        { status: 400 },
-      )
+      console.log("[v0] Recipe suggestions - No pantry items found")
+      return NextResponse.json({
+        success: true,
+        data: { recipes: [] },
+        message: "No pantry items available for recipe suggestions. Add some items to your pantry first!",
+      })
     }
 
     const availableIngredients = pantryItems
-      .filter((item: PantryItem) => item.quantity > 0)
       .map((item: PantryItem) => `${item.name} (${item.quantity} ${item.unit})`)
       .join(", ")
 
-    const { object } = await generateObject({
-      model: groq("llama-3.1-70b-versatile"),
-      schema: RecipeSuggestionsSchema,
-      prompt: `You are a creative chef AI. Generate 3 delicious and practical recipes using primarily these available ingredients: ${availableIngredients}.
+    console.log("[v0] Recipe suggestions - Available ingredients:", availableIngredients)
+
+    const { text } = await generateText({
+      model: groq("llama-3.1-8b-instant"),
+      prompt: `You are a creative chef AI. Generate exactly 3 delicious and practical recipes using primarily these available ingredients: ${availableIngredients}.
 
 Requirements:
 - Use as many of the available ingredients as possible
@@ -144,16 +84,60 @@ Requirements:
 - Be creative but practical
 - If you need a few common ingredients not in the pantry (like salt, pepper, oil), that's okay
 
-Make the recipes diverse in style and cooking method. Focus on creating satisfying, complete meals.`,
+IMPORTANT: Return your response as valid JSON in this exact format:
+{
+  "recipes": [
+    {
+      "name": "Recipe Name",
+      "description": "Brief description",
+      "ingredients": ["ingredient 1", "ingredient 2", "ingredient 3"],
+      "instructions": ["step 1", "step 2", "step 3"],
+      "prepTime": "30 minutes",
+      "difficulty": "Easy",
+      "servings": 4
+    }
+  ]
+}
+
+Make the recipes diverse in style and cooking method. Focus on creating satisfying, complete meals that actually use the ingredients: ${availableIngredients}.`,
     })
+
+    console.log("[v0] Recipe suggestions - Raw AI response:", text)
+
+    let parsedResponse
+    try {
+      parsedResponse = JSON.parse(text)
+    } catch (parseError) {
+      console.error("[v0] Recipe suggestions - JSON parse error:", parseError)
+      // Fallback: try to extract JSON from the response
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        try {
+          parsedResponse = JSON.parse(jsonMatch[0])
+        } catch (fallbackError) {
+          console.error("[v0] Recipe suggestions - Fallback parse error:", fallbackError)
+          return NextResponse.json({ success: false, error: "Failed to parse AI response" }, { status: 500 })
+        }
+      } else {
+        return NextResponse.json({ success: false, error: "Invalid AI response format" }, { status: 500 })
+      }
+    }
+
+    const validationResult = RecipeSuggestionsSchema.safeParse(parsedResponse)
+    if (!validationResult.success) {
+      console.error("[v0] Recipe suggestions - Validation error:", validationResult.error)
+      return NextResponse.json({ success: false, error: "Invalid recipe format from AI" }, { status: 500 })
+    }
+
+    console.log("[v0] Recipe suggestions - Generated recipes:", validationResult.data.recipes.length)
 
     return NextResponse.json({
       success: true,
-      data: object,
-      message: `Generated ${object.recipes.length} AI-powered recipe suggestions`,
+      data: validationResult.data,
+      message: `Generated ${validationResult.data.recipes.length} AI-powered recipe suggestions based on your pantry items`,
     })
   } catch (error) {
-    console.error("Error generating AI recipe suggestions:", error)
+    console.error("[v0] Recipe suggestions - Error:", error)
     return NextResponse.json(
       {
         success: false,
@@ -164,93 +148,118 @@ Make the recipes diverse in style and cooking method. Focus on creating satisfyi
   }
 }
 
-// GET /api/recipes/suggestions - Get AI-powered recipe suggestions
-export async function GET(request: NextRequest): Promise<NextResponse<ApiResponse<RecipeSuggestion[]>>> {
+export async function POST(request: NextRequest): Promise<NextResponse<ApiResponse<any>>> {
   try {
-    const { searchParams } = new URL(request.url)
-    const mealType = searchParams.get("mealType") // breakfast, lunch, dinner, snack
-    const maxPrepTime = searchParams.get("maxPrepTime")
-    const difficulty = searchParams.get("difficulty")
+    console.log("[v0] Recipe suggestions POST API called")
 
-    // Get available pantry items (in production, this would be a database query)
-    const availableItems = mockPantryItems.map((item) => item.name.toLowerCase())
+    const rateLimitResult = await rateLimitByIP(request)
+    if (!rateLimitResult.success) {
+      return NextResponse.json({ success: false, error: rateLimitResult.error }, { status: 429 })
+    }
 
-    // Calculate recipe suggestions with match scores
-    const suggestions: RecipeSuggestion[] = mockRecipes.map((recipe) => {
-      const requiredIngredients = recipe.ingredients.filter((ing) => !ing.optional)
-      const optionalIngredients = recipe.ingredients.filter((ing) => ing.optional)
+    const requestValidationResult = await validateRequest(request)
+    if (!requestValidationResult.success) {
+      return NextResponse.json({ success: false, error: requestValidationResult.error }, { status: 400 })
+    }
 
-      // Check which ingredients we have
-      const availableRequired = requiredIngredients.filter((ing) =>
-        availableItems.some((available) => available.includes(ing.pantryItemName.toLowerCase())),
+    const supabase = await createServerClient()
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser()
+
+    if (authError || !user) {
+      return NextResponse.json({ success: false, error: "Authentication required" }, { status: 401 })
+    }
+
+    const body = await request.json()
+    const { preferences = {} } = body
+
+    // Fetch user's actual pantry items
+    const { data: pantryItems, error: fetchError } = await supabase
+      .from("pantry_items")
+      .select("*")
+      .eq("user_id", user.id)
+      .gt("quantity", 0)
+
+    if (fetchError || !pantryItems || pantryItems.length === 0) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: "No pantry items found",
+        },
+        { status: 400 },
       )
+    }
 
-      const availableOptional = optionalIngredients.filter((ing) =>
-        availableItems.some((available) => available.includes(ing.pantryItemName.toLowerCase())),
-      )
+    const availableIngredients = pantryItems
+      .map((item: PantryItem) => `${item.name} (${item.quantity} ${item.unit})`)
+      .join(", ")
 
-      // Calculate missing ingredients
-      const missingRequired = requiredIngredients.filter(
-        (ing) => !availableItems.some((available) => available.includes(ing.pantryItemName.toLowerCase())),
-      )
+    const { text } = await generateText({
+      model: groq("llama-3.1-8b-instant"),
+      prompt: `You are a creative chef AI. Generate exactly 3 delicious and practical recipes using primarily these available ingredients: ${availableIngredients}.
 
-      // Calculate match score (0-100)
-      const requiredScore =
-        requiredIngredients.length > 0 ? (availableRequired.length / requiredIngredients.length) * 80 : 80
-      const optionalScore =
-        optionalIngredients.length > 0 ? (availableOptional.length / optionalIngredients.length) * 20 : 20
+Requirements:
+- Use as many of the available ingredients as possible
+- Recipes should be realistic and achievable
+- Include prep time in format like "15 minutes" or "30 minutes"
+- Provide clear, step-by-step instructions
+- Difficulty should be Easy, Medium, or Hard
+- Servings should be a reasonable number (1-6)
+- Be creative but practical
+- If you need a few common ingredients not in the pantry (like salt, pepper, oil), that's okay
 
-      const matchScore = Math.round(requiredScore + optionalScore)
-      const canMake = missingRequired.length === 0
+IMPORTANT: Return your response as valid JSON in this exact format:
+{
+  "recipes": [
+    {
+      "name": "Recipe Name",
+      "description": "Brief description",
+      "ingredients": ["ingredient 1", "ingredient 2", "ingredient 3"],
+      "instructions": ["step 1", "step 2", "step 3"],
+      "prepTime": "30 minutes",
+      "difficulty": "Easy",
+      "servings": 4
+    }
+  ]
+}
 
-      return {
-        ...recipe,
-        matchScore,
-        missingIngredients: missingRequired.map((ing) => ing.pantryItemName),
-        canMake,
+Make the recipes diverse in style and cooking method. Focus on creating satisfying, complete meals.`,
+    })
+
+    let parsedResponse
+    try {
+      parsedResponse = JSON.parse(text)
+    } catch (parseError) {
+      const jsonMatch = text.match(/\{[\s\S]*\}/)
+      if (jsonMatch) {
+        try {
+          parsedResponse = JSON.parse(jsonMatch[0])
+        } catch (fallbackError) {
+          return NextResponse.json({ success: false, error: "Failed to parse AI response" }, { status: 500 })
+        }
+      } else {
+        return NextResponse.json({ success: false, error: "Invalid AI response format" }, { status: 500 })
       }
-    })
-
-    // Filter suggestions
-    let filteredSuggestions = suggestions
-
-    // Filter by meal type
-    if (mealType && mealType !== "all") {
-      filteredSuggestions = filteredSuggestions.filter((recipe) => recipe.tags.includes(mealType))
     }
 
-    // Filter by max prep time
-    if (maxPrepTime) {
-      const maxTime = Number.parseInt(maxPrepTime)
-      filteredSuggestions = filteredSuggestions.filter((recipe) => recipe.prepTime <= maxTime)
+    const validationResult = RecipeSuggestionsSchema.safeParse(parsedResponse)
+    if (!validationResult.success) {
+      return NextResponse.json({ success: false, error: "Invalid recipe format from AI" }, { status: 500 })
     }
-
-    // Filter by difficulty
-    if (difficulty && difficulty !== "all") {
-      filteredSuggestions = filteredSuggestions.filter((recipe) => recipe.difficulty === difficulty)
-    }
-
-    // Sort by match score (highest first), then by whether we can make it
-    filteredSuggestions.sort((a, b) => {
-      if (a.canMake && !b.canMake) return -1
-      if (!a.canMake && b.canMake) return 1
-      return b.matchScore - a.matchScore
-    })
-
-    // Limit to top 10 suggestions
-    const topSuggestions = filteredSuggestions.slice(0, 10)
 
     return NextResponse.json({
       success: true,
-      data: topSuggestions,
-      message: `Found ${topSuggestions.length} recipe suggestions`,
+      data: validationResult.data,
+      message: `Generated ${validationResult.data.recipes.length} AI-powered recipe suggestions`,
     })
   } catch (error) {
-    console.error("Error generating recipe suggestions:", error)
+    console.error("Error generating AI recipe suggestions:", error)
     return NextResponse.json(
       {
         success: false,
-        error: "Failed to generate recipe suggestions",
+        error: "Failed to generate AI recipe suggestions",
       },
       { status: 500 },
     )
